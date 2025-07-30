@@ -1,0 +1,167 @@
+product_model.dart
+
+
+class WooProduct {
+  final int id;
+  final String name;
+  final String description;
+  final String? imageUrl;
+  final double regularPrice;
+  final double? salePrice;
+  final double? averageRating;
+
+  WooProduct({
+    required this.id,
+    required this.name,
+    required this.description,
+    this.imageUrl,
+    required this.regularPrice,
+    this.salePrice,
+    this.averageRating,
+  });
+
+  factory WooProduct.fromJson(Map<String, dynamic> json) {
+    return WooProduct(
+      id: json['id'],
+      name: json['name'],
+      description: json['description'] ?? '',
+      imageUrl: json['images'] != null && json['images'].isNotEmpty 
+          ? json['images'][0]['src'] 
+          : null,
+      regularPrice: double.parse(json['regular_price'] ?? '0.0'),
+      salePrice: json['sale_price'] != null 
+          ? double.parse(json['sale_price']) 
+          : null,
+      averageRating: json['average_rating'] != null 
+          ? double.parse(json['average_rating'].toString()) 
+          : null,
+    );
+  }
+}
+
+
+-------------------------------------------------
+
+woocommerce_service.dart
+
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'product_model.dart';
+
+class WooCommerceService {
+  final String baseUrl;
+  final String consumerKey;
+  final String consumerSecret;
+
+  WooCommerceService({
+    required this.baseUrl,
+    required this.consumerKey,
+    required this.consumerSecret,
+  });
+
+  Future<List<WooProduct>> fetchProducts() async {
+    final endpoint = '$baseUrl/wp-json/wc/v3/products';
+    final authString = base64Encode(utf8.encode('$consumerKey:$consumerSecret'));
+
+    try {
+      final response = await http.get(
+        Uri.parse(endpoint),
+        headers: {
+          'Authorization': 'Basic $authString',
+          'Content-Type': 'application/json',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final List<dynamic> jsonList = jsonDecode(response.body);
+        return jsonList.map((json) => WooProduct.fromJson(json)).toList();
+      } else {
+        throw Exception('Failed to load products: ${response.statusCode}');
+      }
+    } catch (e) {
+      throw Exception('Error fetching products: $e');
+    }
+  }
+}
+
+------------------------------------------------
+
+Product_List_Screen.dart
+
+
+
+import 'package:flutter/material.dart';
+import 'woocommerce_service.dart';
+import 'product_model.dart';
+
+class ProductListScreen extends StatefulWidget {
+  @override
+  _ProductListScreenState createState() => _ProductListScreenState();
+}
+
+class _ProductListScreenState extends State<ProductListScreen> {
+  late Future<List<WooProduct>> futureProducts;
+  final WooCommerceService wooService = WooCommerceService(
+    baseUrl: 'https://your-wordpress-site.com', // Replace with your site URL
+    consumerKey: 'ck_your_consumer_key',        // Replace with your key
+    consumerSecret: 'cs_your_consumer_secret',  // Replace with your secret
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    futureProducts = wooService.fetchProducts();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('WooCommerce Products')),
+      body: FutureBuilder<List<WooProduct>>(
+        future: futureProducts,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return Center(child: CircularProgressIndicator());
+          } else if (snapshot.hasError) {
+            return Center(child: Text('Error: ${snapshot.error}'));
+          } else if (!snapshot.hasData || snapshot.data!.isEmpty) {
+            return Center(child: Text('No products found'));
+          } else {
+            return ListView.builder(
+              itemCount: snapshot.data!.length,
+              itemBuilder: (context, index) {
+                final product = snapshot.data![index];
+                return Card(
+                  margin: EdgeInsets.all(8),
+                  child: ListTile(
+                    leading: product.imageUrl != null
+                        ? Image.network(product.imageUrl!, width: 50, height: 50)
+                        : Icon(Icons.image),
+                    title: Text(product.name),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Price: \$${product.regularPrice.toStringAsFixed(2)}'),
+                        if (product.salePrice != null)
+                          Text('Sale: \$${product.salePrice!.toStringAsFixed(2)}'),
+                        if (product.averageRating != null)
+                          Row(
+                            children: [
+                              Icon(Icons.star, color: Colors.amber, size: 16),
+                              Text(' ${product.averageRating!.toStringAsFixed(1)}'),
+                            ],
+                          ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            );
+          }
+        },
+      ),
+    );
+  }
+}
+
+
