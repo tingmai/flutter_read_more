@@ -1,0 +1,499 @@
+WooCommerce and Flutter
+
+Products API
+Base URL: https://yourdomain.com/wp-json/wc/v3/products
+
+Endpoint			Method	Description
+/products			GET	List all products
+/products/<id>			GET	Get a single product
+/products?category=<id>		GET	Filter by category
+/products?search=<query>	GET	Search products
+
+
+Orders API
+Base URL: https://yourdomain.com/wp-json/wc/v3/orders
+
+Endpoint			Method		Description
+/orders				POST		Create a new order
+/orders/<id>			GET		Get order details
+/orders?customer=<id>		GET		List customer orders
+
+
+pubspec.yaml
+----------------------------
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^0.13.5
+  provider: ^6.0.5
+  shared_preferences: ^2.1.1
+  flutter_stripe: ^5.0.0
+  paypal_payment: ^1.0.7
+  uuid: ^3.0.7
+  intl: ^0.18.1
+  flutter_secure_storage: ^8.0.0
+
+
+--------------------------------
+Models
+
+1. models/product_model.dart
+2. models/cart_item.dart
+------------------------
+
+class Product {
+  final int id;
+  final String name;
+  final String category;
+  final String imageUrl;
+  final String description;
+  final double regularPrice;
+  final double? salePrice;
+  final double averageRating;
+
+  Product({
+    required this.id,
+    required this.name,
+    required this.category,
+    required this.imageUrl,
+    required this.description,
+    required this.regularPrice,
+    this.salePrice,
+    required this.averageRating,
+  });
+
+  factory Product.fromJson(Map<String, dynamic> json) {
+    return Product(
+      id: json['id'],
+      name: json['name'],
+      category: json['categories'].isNotEmpty ? json['categories'][0]['name'] : 'Uncategorized',
+      imageUrl: json['images'].isNotEmpty ? json['images'][0]['src'] : '',
+      description: json['description'],
+      regularPrice: double.parse(json['regular_price']),
+      salePrice: json['sale_price'] != '' ? double.parse(json['sale_price']) : null,
+      averageRating: double.parse(json['average_rating'] ?? '0'),
+    );
+  }
+}
+
+
+
+---------------------------
+
+models/cart_item.dart
+
+class CartItem {
+  final Product product;
+  int quantity;
+
+  CartItem({
+    required this.product,
+    this.quantity = 1,
+  });
+
+  double get totalPrice => (product.salePrice ?? product.regularPrice) * quantity;
+}
+
+
+
+
+
+
+
+-------------------------------
+
+Providers
+
+1. providers/product_provider.dart
+2. providers/ cart_provider.dart
+
+----------------------
+
+providers/cart_provider.dart
+
+import 'package:flutter/foundation.dart';
+import 'product_model.dart';
+import 'cart_item.dart';
+
+class CartProvider with ChangeNotifier {
+  final List<CartItem> _items = [];
+
+  List<CartItem> get items => [..._items];
+  int get itemCount => _items.length;
+  double get totalAmount => _items.fold(0, (sum, item) => sum + item.totalPrice);
+
+  void addItem(Product product) {
+    final existingIndex = _items.indexWhere((item) => item.product.id == product.id);
+    if (existingIndex >= 0) {
+      _items[existingIndex].quantity++;
+    } else {
+      _items.add(CartItem(product: product));
+    }
+    notifyListeners();
+  }
+
+  void removeItem(int productId) {
+    _items.removeWhere((item) => item.product.id == productId);
+    notifyListeners();
+  }
+
+  void clear() {
+    _items.clear();
+    notifyListeners();
+  }
+}
+
+------------------------------------
+
+
+
+
+woocommerce_service.dart
+
+
+services/woocommerce_service.dart
+---------------------------------
+
+
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'dart:io';
+import 'product_model.dart';
+import 'cart_item.dart';
+
+class WooCommerceService {
+  final String baseUrl;
+  final String consumerKey;
+  final String consumerSecret;
+
+  WooCommerceService({
+    required this.baseUrl,
+    required this.consumerKey,
+    required this.consumerSecret,
+  });
+
+  // Existing product methods...
+
+  Future<Map<String, dynamic>> createOrder({
+    required List<CartItem> items,
+    required String customerId,
+    required String paymentMethod,
+    required Map<String, dynamic> billing,
+    required Map<String, dynamic> shipping,
+  }) async {
+    final lineItems = items.map((item) {
+      return {
+        "product_id": item.product.id,
+        "quantity": item.quantity,
+        "price": item.product.salePrice ?? item.product.regularPrice,
+      };
+    }).toList();
+
+    final orderData = {
+      "payment_method": paymentMethod,
+      "payment_method_title": paymentMethod == 'paypal' ? 'PayPal' : 'Credit Card',
+      "customer_id": customerId,
+      "billing": billing,
+      "shipping": shipping,
+      "line_items": lineItems,
+      "shipping_lines": [
+        {
+          "method_id": "flat_rate",
+          "method_title": "Flat Rate",
+          "total": "10.00"
+        }
+      ],
+    };
+
+    final response = await http.post(
+      Uri.parse('$baseUrl/wp-json/wc/v3/orders'),
+      headers: {
+        'Authorization': 'Basic ${base64Encode(
+          utf8.encode('$consumerKey:$consumerSecret'),
+        )}',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(orderData),
+    );
+
+    if (response.statusCode == 201) {
+      return jsonDecode(response.body);
+    } else {
+      throw Exception('Failed to create order: ${response.body}');
+    }
+  }
+}
+
+
+--------------------------------------
+
+
+service/payment_service.dart
+
+
+
+import 'package:paypal_payment/paypal_payment.dart';
+import 'package:flutter_stripe/flutter_stripe.dart';
+
+class PaymentService {
+  // Initialize Stripe
+  static void initStripe(String publishableKey) {
+    Stripe.publishableKey = publishableKey;
+  }
+
+  // Process PayPal Payment
+  static Future<bool> processPayPalPayment({
+    required double amount,
+    required String currency,
+    required String description,
+  }) async {
+    try {
+      final response = await PayPalPayment(
+        sandboxMode: true, // Set to false in production
+        clientId: "YOUR_PAYPAL_CLIENT_ID",
+        secretKey: "YOUR_PAYPAL_SECRET_KEY",
+        transactions: [
+          {
+            "amount": {
+              "total": amount.toStringAsFixed(2),
+              "currency": currency,
+            },
+            "description": description,
+          }
+        ],
+      ).checkout();
+
+      return response['status'] == 'success';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Process Stripe Credit Card Payment
+  static Future<bool> processStripePayment({
+    required String cardNumber,
+    required String expiryDate,
+    required String cvv,
+    required double amount,
+    required String currency,
+  }) async {
+    try {
+      // 1. Create a PaymentMethod
+      final paymentMethod = await Stripe.instance.createPaymentMethod(
+        PaymentMethodParams.card(
+          paymentMethodData: PaymentMethodData(
+            billingDetails: const BillingDetails(),
+          ),
+        ),
+      );
+
+      // 2. Confirm PaymentIntent (server-side)
+      // In production, call your backend to confirm payment
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+}
+
+
+
+
+--------------------------
+
+
+screens/ checkout_screen.dart
+-----------------------
+
+
+import 'package:flutter/material.dart';
+import 'package:flutter_credit_card/flutter_credit_card.dart';
+import 'package:provider/provider.dart';
+import 'cart_provider.dart';
+import 'payment_service.dart';
+
+class CheckoutScreen extends StatefulWidget {
+  const CheckoutScreen({super.key});
+
+  @override
+  State<CheckoutScreen> createState() => _CheckoutScreenState();
+}
+
+class _CheckoutScreenState extends State<CheckoutScreen> {
+  String cardNumber = '';
+  String expiryDate = '';
+  String cardHolderName = '';
+  String cvvCode = '';
+  bool usePayPal = true;
+  bool isProcessing = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final cart = Provider.of<CartProvider>(context);
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Checkout')),
+      body: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            children: [
+              const Text('Payment Method', style: TextStyle(fontSize: 18)),
+              Row(
+                children: [
+                  Radio(
+                    value: true,
+                    groupValue: usePayPal,
+                    onChanged: (value) => setState(() => usePayPal = value!),
+                  ),
+                  const Text('PayPal'),
+                  Radio(
+                    value: false,
+                    groupValue: usePayPal,
+                    onChanged: (value) => setState(() => usePayPal = value!),
+                  ),
+                  const Text('Credit Card (Stripe)'),
+                ],
+              ),
+              if (!usePayPal) ...[
+                CreditCardWidget(
+                  cardNumber: cardNumber,
+                  expiryDate: expiryDate,
+                  cardHolderName: cardHolderName,
+                  cvvCode: cvvCode,
+                  showBackView: false,
+                ),
+                CreditCardForm(
+                  onCreditCardModelChange: (creditCardModel) {
+                    setState(() {
+                      cardNumber = creditCardModel.cardNumber;
+                      expiryDate = creditCardModel.expiryDate;
+                      cardHolderName = creditCardModel.cardHolderName;
+                      cvvCode = creditCardModel.cvvCode;
+                    });
+                  },
+                ),
+              ],
+              const SizedBox(height: 20),
+              ElevatedButton(
+                onPressed: isProcessing ? null : () async {
+                  setState(() => isProcessing = true);
+                  bool paymentSuccess;
+                  
+                  if (usePayPal) {
+                    paymentSuccess = await PaymentService.processPayPalPayment(
+                      amount: cart.totalAmount,
+                      currency: 'USD',
+                      description: 'Order from Your Store',
+                    );
+                  } else {
+                    paymentSuccess = await PaymentService.processStripePayment(
+                      cardNumber: cardNumber,
+                      expiryDate: expiryDate,
+                      cvv: cvvCode,
+                      amount: cart.totalAmount,
+                      currency: 'USD',
+                    );
+                  }
+                  
+                  if (paymentSuccess) {
+                    // TODO: Create WooCommerce order
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Payment successful!')),
+                    );
+                    cart.clear();
+                    Navigator.pop(context);
+                  } else {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Payment failed. Please try again.')),
+                    );
+                  }
+                  setState(() => isProcessing = false);
+                },
+                child: isProcessing 
+                    ? const CircularProgressIndicator()
+                    : const Text('Complete Purchase'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+--------------------------
+Order Confirmation Screen
+
+order_confirmation_screen.dart
+
+
+
+
+import 'package:flutter/material.dart';
+
+class OrderConfirmationScreen extends StatelessWidget {
+  final int orderId;
+
+  const OrderConfirmationScreen({super.key, required this.orderId});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Order Confirmation')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.check_circle, color: Colors.green, size: 100),
+            const SizedBox(height: 20),
+            const Text(
+              'Thank You For Your Purchase!',
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Order #$orderId',
+              style: const TextStyle(fontSize: 18),
+            ),
+            const SizedBox(height: 20),
+            const Text('A confirmation email has been sent to your email address.'),
+            const SizedBox(height: 40),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.popUntil(context, (route) => route.isFirst);
+              },
+              child: const Text('Continue Shopping'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+
+
+--------------------
+Config the followings:
+
+WooCommerce Setup
+Enable REST API in WooCommerce → Settings → Advanced → REST API.
+
+Generate API keys (consumer key & secret).
+
+Install Payment Gateways:
+
+PayPal Standard (built-in)
+
+Stripe for WooCommerce (plugin)
+
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  PaymentService.initStripe("YOUR_STRIPE_PUBLISHABLE_KEY");
+  runApp(MyApp());
+}
+
+
